@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<style>
+  body {
+    font-family: sans-serif;
+    margin: 0;
+    padding: 20px;
+  }
+
+  .node rect {
+    cursor: move;
+    fill-opacity: 0.9;
+    shape-rendering: crispEdges;
+  }
+
+  .node text {
+    pointer-events: none;
+    font-size: 14px;
+  }
+
+  svg {
+    overflow: visible;
+    display: block;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  #scatter {
+    height: 400px;
+    margin-bottom: 50px;
+  }
+</style>
+<body>
+  <svg id="scatter" width="1800" height="400"></svg>
+  <svg id="sankey" width="1800" height="600"></svg>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+  <script>
+    const customColorPalette = [
+      "#ffb3ba", "#ffdfba", "#ffffba", "#baffc9", "#bae1ff",
+      "#e0bbff", "#d5f4e6", "#cce2cb", "#f1f0c0", "#c9c9ff",
+      "#f4cccc", "#d9d2e9"
+    ];
+    const colorScale = d3.scaleOrdinal(customColorPalette);
+
+    let clusterData = {};
+    let scatterData = [];
+    let pathData = {};
+    let link;
+
+    Promise.all([
+      d3.text("aa_sankey_by_cluster.jsonl"),
+      d3.json("likelihood_d3_data_again_5.json")
+    ]).then(([sankeyRaw, scatterJson]) => {
+      sankeyRaw.trim().split("\n").forEach(line => {
+        const obj = JSON.parse(line);
+        clusterData[obj.cluster] = obj;
+      });
+      scatterData = scatterJson.scatter;
+      pathData = scatterJson.paths;
+      drawScatter(scatterData);
+    });
+
+    let selectedId = null;  // 전역 변수 추가
+
+    function drawScatter(data) {
+      const svg = d3.select("#scatter");
+      const xScale = d3.scaleLinear()
+        .domain(d3.extent(data, d => d.x)).range([50, 1750]);
+      const yScale = d3.scaleLinear()
+        .domain(d3.extent(data, d => d.y)).range([350, 50]);
+
+      svg.selectAll("circle")
+        .data(data)
+        .join("circle")
+        .attr("cx", d => xScale(d.x))
+        .attr("cy", d => yScale(d.y))
+        .attr("r", 10)
+        .attr("fill", d => colorScale(d.cluster))
+        .attr("stroke", "gray")
+        .attr("cursor", "pointer")
+        .on("click", (event, d) => {
+          selectedId = d.id;
+          updateScatterHighlight();
+          drawSankeyForCluster(d.cluster, d.id);
+        });
+
+      updateScatterHighlight();  // 초기 상태도 반영
+    }
+
+    function updateScatterHighlight() {
+      d3.select("#scatter").selectAll("circle")
+        .attr("fill-opacity", d => {
+          if (selectedId === null) return 1.0;
+          return d.id === selectedId ? 1.0 : 0.5;  // 선택된 노드만 불투명, 나머지는 투명
+        })
+        .attr("stroke", d => d.id === selectedId ? "black" : "gray")
+        .attr("stroke-width", d => d.id === selectedId ? 2 : 1.5);
+    }
+
+    function drawSankeyForCluster(clusterId, patientId) {
+      const svg = d3.select("#sankey").html("");
+      const width = 1800;
+      const clusterColor = colorScale(clusterId);
+
+      const sankeyLayout = d3.sankey()
+        .nodeWidth(20)
+        .nodePadding(50)
+        .nodeAlign(d3.sankeyJustify)
+        .extent([[1, 1], [width - 1, 599]]);
+
+      const cluster = clusterData[clusterId];
+      const nodes = cluster.nodeData.map((d, i) => ({ ...d, index: i }));
+      const indexToNode = Object.fromEntries(nodes.map((d, i) => [i, d]));
+
+      const links = cluster.linkData.map(link => ({
+        source: indexToNode[link.source],
+        target: indexToNode[link.target],
+        value: link.value
+      }));
+
+      const { nodes: layoutNodes, links: layoutLinks } = sankeyLayout({ nodes, links });
+
+      link = svg.append("g")
+        .selectAll("path")
+        .data(layoutLinks)
+        .join("path")
+        .attr("d", d3.sankeyLinkHorizontal())
+        .attr("fill", "none")
+        .attr("stroke", "#ccc")
+        .attr("stroke-opacity", 0.2)
+        .attr("stroke-width", d => Math.max(1, d.width))
+        .attr("stroke-dasharray", function () { return this.getTotalLength(); })
+        .attr("stroke-dashoffset", function () { return this.getTotalLength(); })
+        .attr("class", "sankey-link")
+        .transition()
+        .duration(800)
+        .ease(d3.easeCubicOut)
+        .attr("stroke-dashoffset", 0);
+
+      svg.append("g")
+        .selectAll("g")
+        .data(layoutNodes)
+        .join("g")
+        .attr("transform", d => `translate(${d.x0},${d.y0})`)
+        .call(g => {
+          g.append("rect")
+            .attr("height", d => d.y1 - d.y0)
+            .attr("width", d => d.x1 - d.x0)
+            .attr("fill", "#666")
+            .attr("opacity", 0)
+            .transition()
+            .duration(600)
+            .attr("opacity", 1);
+
+          const text = g.append("text")
+            .attr("x", d => d.x0 < width / 2 ? 25 : -5)
+            .attr("y", d => (d.y1 - d.y0) / 2)
+            .attr("dy", "0.35em")
+            .attr("text-anchor", d => d.x0 < width / 2 ? "start" : "end");
+
+          const tspans = text.selectAll("tspan")
+            .data(d => {
+              const words = d.name.split(/\s+/);
+              const maxChars = 15;
+              const lines = [];
+              let currentLine = words[0] || "";
+              for (let i = 1; i < words.length; i++) {
+                if ((currentLine + " " + words[i]).length > maxChars) {
+                  lines.push(currentLine);
+                  currentLine = words[i];
+                } else {
+                  currentLine += " " + words[i];
+                }
+              }
+              lines.push(currentLine);
+              return lines.map((line, i) => ({ line, index: i, x0: d.x0 }));
+            })
+            .join("tspan")
+            .attr("x", d => d.x0 < width / 2 ? 25 : -5)
+            .attr("dy", (d, i) => `${i === 0 ? 0 : 1.1}em`)
+            .text(d => d.line)
+            .attr("opacity", 0)
+            .transition()
+            .delay((d, i) => i * 40)
+            .duration(400)
+            .attr("opacity", 1);
+        });
+
+      highlightPatientPath(cluster, patientId, layoutLinks, clusterColor);
+    }
+
+    function highlightPatientPath(cluster, patientId, links, clusterColor) {
+      const pathEvents = pathData[patientId];
+      if (!pathEvents) return;
+
+      const pathEventNames = pathEvents.map(e => e.replace(/_\d+$/, ""));
+      const highlightSet = new Set();
+
+      for (const l of links) {
+        const source = l.source.name;
+        const target = l.target.name;
+        if (pathEventNames.includes(source) && pathEventNames.includes(target)) {
+          highlightSet.add(`${source}→${target}`);
+        }
+      }
+
+      d3.selectAll(".sankey-link")
+        .attr("stroke", d => {
+          const key = `${d.source.name}→${d.target.name}`;
+          return highlightSet.has(key) ? clusterColor : "#ccc";
+        })
+        .attr("stroke-opacity", d => {
+          const key = `${d.source.name}→${d.target.name}`;
+          return highlightSet.has(key) ? 0.9 : 0.2;
+        })
+        .attr("stroke-width", d => {
+          const key = `${d.source.name}→${d.target.name}`;
+          return highlightSet.has(key) ? Math.max(2, d.width + 1) : d.width;
+        });
+    }
+  </script>
+</body>
